@@ -16,6 +16,20 @@ import string
 import html
 from io import BytesIO
 from datetime import datetime
+import time
+
+# ================= TIMEZONE (BST: UTC+6) =================
+def get_bst_now():
+    """Return current time in Bangladesh Standard Time (BST) as formatted string."""
+    try:
+        # Python 3.9+ zoneinfo
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Asia/Dhaka")).strftime("%Y-%m-%d %H:%M:%S")
+    except ImportError:
+        # Fallback to pytz
+        import pytz
+        tz = pytz.timezone('Asia/Dhaka')
+        return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
 # ================= ENV =================
 TOKEN = os.environ.get("BOT_TOKEN")
@@ -26,15 +40,26 @@ user_active_ticket = {}
 ticket_status = {}
 ticket_user = {}
 ticket_username = {}
+# ticket_messages now stores (sender, message, timestamp)
 ticket_messages = {}
 user_tickets = {}
 group_message_map = {}
 ticket_created_at = {}
 
+# New: store latest username per user (fix bug 22)
+user_latest_username = {}
+
+# New: rate limiting storage (fix bug 18)
+user_message_timestamps = {}  # user_id -> list of timestamps (seconds)
+
 # ================= HELPERS =================
 def generate_ticket_id(length=8):
     chars = string.ascii_letters + string.digits + "*#@$&"
-    return "BV-" + "".join(random.choice(chars) for _ in range(length))
+    # Fix bug 25: avoid duplicate IDs
+    while True:
+        tid = "BV-" + "".join(random.choice(chars) for _ in range(length))
+        if tid not in ticket_status:
+            return tid
 
 def code(tid):
     """Format ticket ID in code tags for easy copying"""
@@ -44,12 +69,26 @@ def ticket_header(ticket_id, status):
     return f"🎫 Ticket ID: {code(ticket_id)}\nStatus: {status}\n\n"
 
 def user_info_block(user):
+    # Escape first name to avoid HTML injection
+    safe_first_name = html.escape(user.first_name or "")
     return (
         "User Information\n"
         f"• User ID   : {user.id}\n"
-        f"• Username  : @{user.username or ''}\n"
-        f"• Full Name : {user.first_name or ''}\n\n"
+        f"• Username  : @{html.escape(user.username or '')}\n"
+        f"• Full Name : {safe_first_name}\n\n"
     )
+
+# Rate limit check (fix bug 18)
+def check_rate_limit(user_id):
+    now = time.time()
+    if user_id not in user_message_timestamps:
+        user_message_timestamps[user_id] = []
+    # Remove timestamps older than 60 seconds
+    user_message_timestamps[user_id] = [t for t in user_message_timestamps[user_id] if now - t < 60]
+    if len(user_message_timestamps[user_id]) >= 2:
+        return False
+    user_message_timestamps[user_id].append(now)
+    return True
 
 # ================= /start =================
 async def start(update: Update, context):
@@ -58,13 +97,13 @@ async def start(update: Update, context):
     ])
     await update.message.reply_text(
         "Hey Sir/Mam 👋\n\n"
-        "Welcome to Circle Support.\n"
-        "You can contact the Circle Team using this bot.\n\n"
+        "Welcome to BlockVeil Support.\n"
+        "You can contact the BlockVeil team using this bot.\n\n"
         "🔐 Privacy Notice\n"
         "Your information is kept strictly confidential.\n\n"
         "Use the button below to create a support ticket.\n\n"
-        "📧 support@circlecom\n\n"
-        "Circle Support Team",
+        "📧 support.blockveil@protonmail.com\n\n"
+        "— BlockVeil Support Team",
         reply_markup=keyboard,
         parse_mode="HTML"
     )
@@ -88,8 +127,10 @@ async def create_ticket(update: Update, context):
     ticket_user[ticket_id] = user.id
     ticket_username[ticket_id] = user.username or ""
     ticket_messages[ticket_id] = []
-    ticket_created_at[ticket_id] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ticket_created_at[ticket_id] = get_bst_now()  # BST time
     user_tickets.setdefault(user.id, []).append(ticket_id)
+    # Store latest username
+    user_latest_username[user.id] = user.username or ""
 
     await query.message.reply_text(
         f"🎫 Ticket Created: {code(ticket_id)}\n"
@@ -102,6 +143,14 @@ async def create_ticket(update: Update, context):
 # ================= USER MESSAGE (TEXT + MEDIA) =================
 async def user_message(update: Update, context):
     user = update.message.from_user
+
+    # Rate limit check (fix bug 18)
+    if not check_rate_limit(user.id):
+        await update.message.reply_text(
+            "⏱️ You can send at most 2 messages per minute. Please wait a moment.",
+            parse_mode="HTML"
+        )
+        return
 
     if user.id not in user_active_ticket:
         keyboard = InlineKeyboardMarkup([
@@ -119,60 +168,147 @@ async def user_message(update: Update, context):
     if ticket_status[ticket_id] == "Pending":
         ticket_status[ticket_id] = "Processing"
 
+    # Update latest username
+    user_latest_username[user.id] = user.username or ""
+
     header = ticket_header(ticket_id, ticket_status[ticket_id]) + user_info_block(user) + "Message:\n"
+    caption_text = update.message.caption or ""  # Fix bug 4: capture caption
+    safe_caption = html.escape(caption_text) if caption_text else ""
 
     sent = None
     log_text = ""
+    timestamp = get_bst_now()  # BST time
 
+    # Handle all message types (fix bug 3)
     if update.message.text:
         log_text = html.escape(update.message.text)
+        full_message = header + log_text
+        sent = await context.bot.send_message(
+            chat_id=GROUP_ID,
+            text=full_message,
+            parse_mode="HTML"
+        )
+
+    elif update.message.photo:
+        log_text = "[Photo]"
+        full_caption = header + (safe_caption if safe_caption else log_text)
+        sent = await context.bot.send_photo(
+            chat_id=GROUP_ID,
+            photo=update.message.photo[-1].file_id,
+            caption=full_caption,
+            parse_mode="HTML"
+        )
+
+    elif update.message.voice:
+        log_text = "[Voice Message]"
+        full_caption = header + (safe_caption if safe_caption else log_text)
+        sent = await context.bot.send_voice(
+            chat_id=GROUP_ID,
+            voice=update.message.voice.file_id,
+            caption=full_caption,
+            parse_mode="HTML"
+        )
+
+    elif update.message.video:
+        log_text = "[Video]"
+        full_caption = header + (safe_caption if safe_caption else log_text)
+        sent = await context.bot.send_video(
+            chat_id=GROUP_ID,
+            video=update.message.video.file_id,
+            caption=full_caption,
+            parse_mode="HTML"
+        )
+
+    elif update.message.document:
+        log_text = "[Document]"
+        full_caption = header + (safe_caption if safe_caption else log_text)
+        sent = await context.bot.send_document(
+            chat_id=GROUP_ID,
+            document=update.message.document.file_id,
+            caption=full_caption,
+            parse_mode="HTML"
+        )
+
+    elif update.message.audio:
+        log_text = "[Audio]"
+        full_caption = header + (safe_caption if safe_caption else log_text)
+        sent = await context.bot.send_audio(
+            chat_id=GROUP_ID,
+            audio=update.message.audio.file_id,
+            caption=full_caption,
+            parse_mode="HTML"
+        )
+
+    elif update.message.sticker:
+        log_text = "[Sticker]"
+        sent = await context.bot.send_sticker(
+            chat_id=GROUP_ID,
+            sticker=update.message.sticker.file_id
+        )
+        # Send caption separately if present
+        if safe_caption:
+            await context.bot.send_message(
+                chat_id=GROUP_ID,
+                text=header + safe_caption,
+                parse_mode="HTML"
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=GROUP_ID,
+                text=header + log_text,
+                parse_mode="HTML"
+            )
+        # We'll map the sticker message ID
+        if sent:
+            group_message_map[sent.message_id] = ticket_id
+
+    elif update.message.animation:
+        log_text = "[Animation/GIF]"
+        full_caption = header + (safe_caption if safe_caption else log_text)
+        sent = await context.bot.send_animation(
+            chat_id=GROUP_ID,
+            animation=update.message.animation.file_id,
+            caption=full_caption,
+            parse_mode="HTML"
+        )
+
+    elif update.message.video_note:
+        log_text = "[Video Note]"
+        sent = await context.bot.send_video_note(
+            chat_id=GROUP_ID,
+            video_note=update.message.video_note.file_id
+        )
+        if safe_caption:
+            await context.bot.send_message(
+                chat_id=GROUP_ID,
+                text=header + safe_caption,
+                parse_mode="HTML"
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=GROUP_ID,
+                text=header + log_text,
+                parse_mode="HTML"
+            )
+
+    else:
+        # Unsupported message type
+        log_text = f"[Unsupported message type]"
+        await update.message.reply_text(
+            "❌ This message type is not supported. Please send text, photo, video, document, audio, sticker, etc.",
+            parse_mode="HTML"
+        )
         sent = await context.bot.send_message(
             chat_id=GROUP_ID,
             text=header + log_text,
             parse_mode="HTML"
         )
 
-    elif update.message.photo:
-        log_text = "[Photo]"
-        sent = await context.bot.send_photo(
-            chat_id=GROUP_ID,
-            photo=update.message.photo[-1].file_id,
-            caption=header + log_text,
-            parse_mode="HTML"
-        )
-
-    elif update.message.voice:
-        log_text = "[Voice Message]"
-        sent = await context.bot.send_voice(
-            chat_id=GROUP_ID,
-            voice=update.message.voice.file_id,
-            caption=header + log_text,
-            parse_mode="HTML"
-        )
-
-    elif update.message.video:
-        log_text = "[Video]"
-        sent = await context.bot.send_video(
-            chat_id=GROUP_ID,
-            video=update.message.video.file_id,
-            caption=header + log_text,
-            parse_mode="HTML"
-        )
-
-    elif update.message.document:
-        log_text = "[Document]"
-        sent = await context.bot.send_document(
-            chat_id=GROUP_ID,
-            document=update.message.document.file_id,
-            caption=header + log_text,
-            parse_mode="HTML"
-        )
-
     if sent:
         group_message_map[sent.message_id] = ticket_id
-        # Store user's actual username
         sender_name = f"@{user.username}" if user.username else user.first_name or "User"
-        ticket_messages[ticket_id].append((sender_name, log_text))
+        # Store with timestamp (fix bug 14)
+        ticket_messages[ticket_id].append((sender_name, log_text, timestamp))
 
 # ================= GROUP REPLY (TEXT + MEDIA) =================
 async def group_reply(update: Update, context):
@@ -186,7 +322,19 @@ async def group_reply(update: Update, context):
     ticket_id = group_message_map[reply_id]
     user_id = ticket_user[ticket_id]
 
+    # Fix bug 11: block reply if ticket is closed
+    if ticket_status.get(ticket_id) == "Closed":
+        await update.message.reply_text(
+            f"⚠️ Ticket {code(ticket_id)} is already closed. Cannot send reply.",
+            parse_mode="HTML"
+        )
+        return
+
     prefix = f"🎫 Ticket ID: {code(ticket_id)}\n\n"
+    caption_text = update.message.caption or ""  # Fix bug 5: capture caption
+    safe_caption = html.escape(caption_text) if caption_text else ""
+    timestamp = get_bst_now()  # BST time
+
     log_text = ""
 
     if update.message.text:
@@ -199,41 +347,111 @@ async def group_reply(update: Update, context):
 
     elif update.message.photo:
         log_text = "[Photo]"
+        full_caption = prefix + (safe_caption if safe_caption else log_text)
         await context.bot.send_photo(
             chat_id=user_id,
             photo=update.message.photo[-1].file_id,
-            caption=prefix,
+            caption=full_caption,
             parse_mode="HTML"
         )
 
     elif update.message.voice:
         log_text = "[Voice Message]"
+        full_caption = prefix + (safe_caption if safe_caption else log_text)
         await context.bot.send_voice(
             chat_id=user_id,
             voice=update.message.voice.file_id,
-            caption=prefix,
+            caption=full_caption,
             parse_mode="HTML"
         )
 
     elif update.message.video:
         log_text = "[Video]"
+        full_caption = prefix + (safe_caption if safe_caption else log_text)
         await context.bot.send_video(
             chat_id=user_id,
             video=update.message.video.file_id,
-            caption=prefix,
+            caption=full_caption,
             parse_mode="HTML"
         )
 
     elif update.message.document:
         log_text = "[Document]"
+        full_caption = prefix + (safe_caption if safe_caption else log_text)
         await context.bot.send_document(
             chat_id=user_id,
             document=update.message.document.file_id,
-            caption=prefix,
+            caption=full_caption,
             parse_mode="HTML"
         )
 
-    ticket_messages[ticket_id].append(("Circle Support", log_text))
+    elif update.message.audio:
+        log_text = "[Audio]"
+        full_caption = prefix + (safe_caption if safe_caption else log_text)
+        await context.bot.send_audio(
+            chat_id=user_id,
+            audio=update.message.audio.file_id,
+            caption=full_caption,
+            parse_mode="HTML"
+        )
+
+    elif update.message.sticker:
+        log_text = "[Sticker]"
+        await context.bot.send_sticker(
+            chat_id=user_id,
+            sticker=update.message.sticker.file_id
+        )
+        if safe_caption:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=prefix + safe_caption,
+                parse_mode="HTML"
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=prefix + log_text,
+                parse_mode="HTML"
+            )
+
+    elif update.message.animation:
+        log_text = "[Animation/GIF]"
+        full_caption = prefix + (safe_caption if safe_caption else log_text)
+        await context.bot.send_animation(
+            chat_id=user_id,
+            animation=update.message.animation.file_id,
+            caption=full_caption,
+            parse_mode="HTML"
+        )
+
+    elif update.message.video_note:
+        log_text = "[Video Note]"
+        await context.bot.send_video_note(
+            chat_id=user_id,
+            video_note=update.message.video_note.file_id
+        )
+        if safe_caption:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=prefix + safe_caption,
+                parse_mode="HTML"
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=prefix + log_text,
+                parse_mode="HTML"
+            )
+
+    else:
+        log_text = f"[Unsupported message type]"
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=prefix + "Unsupported message type.",
+            parse_mode="HTML"
+        )
+
+    ticket_messages[ticket_id].append(("BlockVeil Support", log_text, timestamp))
 
 # ================= /close (ARG OR REPLY) =================
 async def close_ticket(update: Update, context):
@@ -267,63 +485,66 @@ async def close_ticket(update: Update, context):
         text=f"🎫 Ticket ID: {code(ticket_id)}\nStatus: Closed",
         parse_mode="HTML"
     )
-    await update.message.reply_text(f" Ticket {code(ticket_id)} closed.", parse_mode="HTML")
+    # Fix bug 23: show ticket ID in confirmation
+    await update.message.reply_text(f"✅ Ticket {code(ticket_id)} closed.", parse_mode="HTML")
 
-# ================= /requestclose (NEW) =================
+# ================= /requestclose =================
 async def request_close(update: Update, context):
     """User command to request ticket closure"""
-    user = update.message.from_user
-    
-    # Check if user has arguments
-    if not context.args:
+    # Fix bug 10: allow only in private chat
+    if update.effective_chat.type != "private":
         await update.message.reply_text(
-            "❌ Please provide a ticket ID.\n"
-            "To close your ticket, simply use the command /requestclose [your ticket ID] ,this will notify our team to finalize your ticket promptly!",
+            "❌ This command can only be used in private chat with the bot.",
             parse_mode="HTML"
         )
         return
-    
+
+    user = update.message.from_user
+
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Please provide a ticket ID.\n"
+            "Usage: /requestclose BV-XXXXX",
+            parse_mode="HTML"
+        )
+        return
+
     ticket_id = context.args[0]
-    
-    # Verify ticket exists
+
     if ticket_id not in ticket_status:
         await update.message.reply_text(
             f"❌ Ticket {code(ticket_id)} not found.",
             parse_mode="HTML"
         )
         return
-    
-    # Verify ticket belongs to this user
+
     if ticket_user.get(ticket_id) != user.id:
         await update.message.reply_text(
             "❌ This ticket does not belong to you.",
             parse_mode="HTML"
         )
         return
-    
-    # Check if ticket is already closed
+
     if ticket_status[ticket_id] == "Closed":
         await update.message.reply_text(
             f"⚠️ Ticket {code(ticket_id)} is already closed.",
             parse_mode="HTML"
         )
         return
-    
-    # Send notification to management group
+
     username = f"@{user.username}" if user.username else "N/A"
     notification = (
         f"🔔 <b>Ticket Close Request</b>\n\n"
         f"User {username} [ User ID : {user.id} ] has requested to close ticket ID {code(ticket_id)}\n\n"
         f"Please review and properly close the ticket."
     )
-    
+
     await context.bot.send_message(
         chat_id=GROUP_ID,
         text=notification,
         parse_mode="HTML"
     )
-    
-    # Confirm to user
+
     await update.message.reply_text(
         f"✅ Your request to close ticket {code(ticket_id)} has been sent to the support team.\n"
         f"They will review and close it shortly.",
@@ -348,32 +569,31 @@ async def send_direct(update: Update, context):
 
     target = context.args[0]
     message = html.escape(" ".join(context.args[1:]))
-    
+
     # Handle @all broadcast
     if target == "@all":
         sent_count = 0
         failed_count = 0
         unique_users = set()
-        
-        # Get all unique users from ticket_user
+
         for user_id in ticket_user.values():
             unique_users.add(user_id)
-        
+
         total_users = len(unique_users)
         await update.message.reply_text(f"📢 Broadcasting to {total_users} users...", parse_mode="HTML")
-        
+
         for user_id in unique_users:
             try:
                 await context.bot.send_message(
                     chat_id=user_id,
-                    text=f"📢 Announcement from Circle Support:\n\n{message}",
+                    text=f"📢 Announcement from BlockVeil Support:\n\n{message}",
                     parse_mode="HTML"
                 )
                 sent_count += 1
             except Exception as e:
                 failed_count += 1
                 print(f"Failed to send to {user_id}: {e}")
-        
+
         await update.message.reply_text(
             f"📊 Broadcast Complete:\n"
             f"✅ Sent: {sent_count}\n"
@@ -382,8 +602,8 @@ async def send_direct(update: Update, context):
             parse_mode="HTML"
         )
         return
-    
-    # Handle individual messages (existing code)
+
+    # Handle individual messages
     user_id = None
     ticket_id = None
 
@@ -396,35 +616,50 @@ async def send_direct(update: Update, context):
             await update.message.reply_text("⚠️ Ticket is closed.", parse_mode="HTML")
             return
         user_id = ticket_user[ticket_id]
-        # Include ticket ID in message
         message = f"🎫 Ticket ID: {code(ticket_id)}\n\n{message}"
 
     elif target.startswith("@"):
         username = target[1:]
-        for tid, uname in ticket_username.items():
-            if uname == username:
-                user_id = ticket_user[tid]
-                ticket_id = tid
-                if ticket_id:
-                    message = f"🎫 Ticket ID: {code(ticket_id)}\n\n{message}"
+        # Search in latest usernames first (case-insensitive)
+        username_lower = username.lower()
+        for uid, uname in user_latest_username.items():
+            if uname.lower() == username_lower:
+                user_id = uid
+                # Find any ticket for this user to get ticket ID
+                for tid in user_tickets.get(user_id, []):
+                    ticket_id = tid
+                    break
                 break
+        if not user_id:
+            for tid, uname in ticket_username.items():
+                if uname.lower() == username_lower:
+                    user_id = ticket_user[tid]
+                    ticket_id = tid
+                    break
+        if ticket_id:
+            message = f"🎫 Ticket ID: {code(ticket_id)}\n\n{message}"
 
     else:
         try:
             user_id = int(target)
-        except:
+        except ValueError:
+            # Fix bug 12: show error for invalid user ID
+            await update.message.reply_text("❌ Invalid user ID or target.", parse_mode="HTML")
             return
 
     if not user_id:
         await update.message.reply_text("❌ User not found.", parse_mode="HTML")
         return
 
-    await context.bot.send_message(
-        chat_id=user_id,
-        text=f"📩 Circle Support:\n\n{message}",
-        parse_mode="HTML"
-    )
-    await update.message.reply_text(" Message sent Successfully.", parse_mode="HTML")
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"📩 BlockVeil Support:\n\n{message}",
+            parse_mode="HTML"
+        )
+        await update.message.reply_text("✅ Message sent successfully.", parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"No user was found in the database based on the information you provided to send the message. {e}", parse_mode="HTML")
 
 # ================= /open =================
 async def open_ticket(update: Update, context):
@@ -445,7 +680,7 @@ async def open_ticket(update: Update, context):
 
     ticket_status[ticket_id] = "Processing"
     user_active_ticket[ticket_user[ticket_id]] = ticket_id
-    await update.message.reply_text(f" Ticket {code(ticket_id)} reopened.", parse_mode="HTML")
+    await update.message.reply_text(f"✅ Ticket {code(ticket_id)} reopened.", parse_mode="HTML")
 
 # ================= /status =================
 async def status_ticket(update: Update, context):
@@ -458,6 +693,9 @@ async def status_ticket(update: Update, context):
 
     ticket_id = context.args[0]
     text = f"🎫 Ticket ID: {code(ticket_id)}\nStatus: {ticket_status[ticket_id]}"
+    # Fix bug 28: show creation time
+    if ticket_id in ticket_created_at:
+        text += f"\nCreated at: {ticket_created_at[ticket_id]} (BST)"
     if update.effective_chat.id == GROUP_ID:
         text += f"\nUser: @{ticket_username.get(ticket_id, 'N/A')}"
 
@@ -471,6 +709,14 @@ async def list_tickets(update: Update, context):
         return
 
     mode = context.args[0].lower()
+    # Fix bug 16: validate mode
+    if mode not in ["open", "close"]:
+        await update.message.reply_text(
+            "❌ Invalid mode. Use /list open or /list close",
+            parse_mode="HTML"
+        )
+        return
+
     data = []
 
     for tid, st in ticket_status.items():
@@ -489,28 +735,27 @@ async def list_tickets(update: Update, context):
 
     await update.message.reply_text(text, parse_mode="HTML")
 
-# ================= /export (FIXED FORMAT) =================
+# ================= /export =================
 async def export_ticket(update: Update, context):
     if update.effective_chat.id != GROUP_ID or not context.args:
         return
-    
+
     ticket_id = context.args[0]
     if ticket_id not in ticket_messages:
         await update.message.reply_text("❌ Ticket not found.", parse_mode="HTML")
         return
-    
+
     buf = BytesIO()
-    buf.write("Circle Support Messages\n\n".encode())
-    
-    for sender, message in ticket_messages[ticket_id]:
-        if sender == "Circle Support":
-            label = "circle support team"
-        else:
-            # Use the actual username stored (which already includes @ if available)
-            label = sender
-        
-        buf.write(f"{label} : {message}\n".encode())
-    
+    buf.write("BlockVeil Support Messages\n\n".encode())
+
+    # Fix bug 14: include timestamp and unescape message
+    for sender, message, timestamp in ticket_messages[ticket_id]:
+        # Unescape the stored escaped message to get original
+        import html as html_lib
+        original_message = html_lib.unescape(message)
+        line = f"[{timestamp}] {sender} : {original_message}\n"
+        buf.write(line.encode())
+
     buf.seek(0)
     buf.name = f"{ticket_id}.txt"
     await context.bot.send_document(GROUP_ID, document=buf)
@@ -519,56 +764,66 @@ async def export_ticket(update: Update, context):
 async def ticket_history(update: Update, context):
     if update.effective_chat.id != GROUP_ID or not context.args:
         return
-    
+
     target = context.args[0]
     user_id = None
-    
+
     if target.startswith("@"):
         username = target[1:]
-        for tid, uname in ticket_username.items():
-            if uname == username:
-                user_id = ticket_user[tid]
+        username_lower = username.lower()
+        # Search in latest usernames first (case-insensitive)
+        for uid, uname in user_latest_username.items():
+            if uname.lower() == username_lower:
+                user_id = uid
                 break
+        if not user_id:
+            for tid, uname in ticket_username.items():
+                if uname.lower() == username_lower:
+                    user_id = ticket_user[tid]
+                    break
     else:
         try:
             user_id = int(target)
         except:
             pass
-    
+
     if user_id not in user_tickets:
         await update.message.reply_text("❌ User not found.", parse_mode="HTML")
         return
-    
+
     text = f"📋 Ticket History for {target}\n\n"
     for i, tid in enumerate(user_tickets[user_id], 1):
         status = ticket_status.get(tid, "Unknown")
-        text += f"{i}. {code(tid)} - {status}\n"
-    
+        created = ticket_created_at.get(tid, "")
+        text += f"{i}. {code(tid)} - {status}"
+        if created:
+            text += f" (Created: {created} BST)"
+        text += "\n"
+
     await update.message.reply_text(text, parse_mode="HTML")
 
 # ================= /user =================
 async def user_list(update: Update, context):
     if update.effective_chat.id != GROUP_ID:
         return
-    
+
     buf = BytesIO()
     seen_users = set()
     count = 1
-    
-    # Iterate through all tickets to get unique users
+
     for tid, user_id in ticket_user.items():
         if user_id in seen_users:
             continue
-            
         seen_users.add(user_id)
-        username = ticket_username.get(tid, "N/A")
+        # Fix bug 22: use latest username
+        username = user_latest_username.get(user_id, ticket_username.get(tid, "N/A"))
         buf.write(f"{count} - @{username} - {user_id}\n".encode())
         count += 1
-    
+
     if count == 1:
         await update.message.reply_text("❌ No users found.", parse_mode="HTML")
         return
-    
+
     buf.seek(0)
     buf.name = "users_list.txt"
     await context.bot.send_document(GROUP_ID, document=buf)
@@ -577,61 +832,63 @@ async def user_list(update: Update, context):
 async def which_user(update: Update, context):
     if update.effective_chat.id != GROUP_ID or not context.args:
         return
-    
+
     target = context.args[0]
     user_id = None
     username = None
-    
-    # Determine target type
+
     if target.startswith("@"):
-        # Username
         username_target = target[1:]
-        for tid, uname in ticket_username.items():
-            if uname == username_target:
-                user_id = ticket_user[tid]
+        username_lower = username_target.lower()
+        # Fix bug 22: search in latest usernames first (case-insensitive)
+        for uid, uname in user_latest_username.items():
+            if uname.lower() == username_lower:
+                user_id = uid
                 username = uname
                 break
-    
+        if not user_id:
+            for tid, uname in ticket_username.items():
+                if uname.lower() == username_lower:
+                    user_id = ticket_user[tid]
+                    username = uname
+                    break
+
     elif target.startswith("BV-"):
-        # Ticket ID
         ticket_id = target
         if ticket_id in ticket_user:
             user_id = ticket_user[ticket_id]
-            username = ticket_username.get(ticket_id, "N/A")
-    
+            username = user_latest_username.get(user_id, ticket_username.get(ticket_id, "N/A"))
+
     else:
-        # User ID
         try:
             user_id = int(target)
-            # Find username for this user_id
-            for tid, uid in ticket_user.items():
-                if uid == user_id:
-                    username = ticket_username.get(tid, "N/A")
-                    break
+            username = user_latest_username.get(user_id, "")
         except:
             pass
-    
+
     if not user_id:
         await update.message.reply_text("❌ User not found.", parse_mode="HTML")
         return
-    
-    # Get all tickets for this user
+
     user_ticket_list = user_tickets.get(user_id, [])
-    
+
     if not user_ticket_list:
-        await update.message.reply_text("❌ No tickets found for this user.", parse_mode="HTML")
+        await update.message.reply_text("No user was found in the database based on the information you provided.", parse_mode="HTML")
         return
-    
-    # Prepare response
+
     response = f"👤 <b>User Information</b>\n\n"
     response += f"• User ID : {user_id}\n"
-    response += f"• Username : @{username or 'N/A'}\n\n"
+    response += f"• Username : @{html.escape(username) if username else 'N/A'}\n\n"
     response += f"📊 <b>Created total {len(user_ticket_list)} tickets.</b>\n\n"
-    
+
     for i, ticket_id in enumerate(user_ticket_list, 1):
         status = ticket_status.get(ticket_id, "Unknown")
-        response += f"{i}. {code(ticket_id)} - {status}\n"
-    
+        created = ticket_created_at.get(ticket_id, "")
+        response += f"{i}. {code(ticket_id)} - {status}"
+        if created:
+            response += f" (Created: {created} BST)"
+        response += "\n"
+
     await update.message.reply_text(response, parse_mode="HTML")
 
 # ================= INIT =================
@@ -647,7 +904,7 @@ app.add_handler(CommandHandler("export", export_ticket))
 app.add_handler(CommandHandler("history", ticket_history))
 app.add_handler(CommandHandler("user", user_list))
 app.add_handler(CommandHandler("which", which_user))
-app.add_handler(CommandHandler("requestclose", request_close))  # New command
+app.add_handler(CommandHandler("requestclose", request_close))
 app.add_handler(CallbackQueryHandler(create_ticket, pattern="create_ticket"))
 app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, user_message))
 app.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, group_reply))
