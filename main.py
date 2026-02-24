@@ -463,14 +463,7 @@ async def close_ticket(update: Update, context):
     if context.args:
         ticket_id = context.args[0]
     elif update.message.reply_to_message:
-        reply_id = update.message.reply_to_message.message_id
-        ticket_id = group_message_map.get(reply_id)
-        if not ticket_id:
-            await update.message.reply_text(
-                "❌ Could not determine ticket from reply. Please use /close with ticket ID.",
-                parse_mode="HTML"
-            )
-            return
+        ticket_id = group_message_map.get(update.message.reply_to_message.message_id)
 
     if not ticket_id or ticket_id not in ticket_status:
         await update.message.reply_text(
@@ -692,7 +685,7 @@ async def open_ticket(update: Update, context):
 
 # ================= /status =================
 async def status_ticket(update: Update, context):
-    if not context.args or context.args[0] not in ticket_status:
+    if not context.args:
         await update.message.reply_text(
             "Use /status BV-XXXXX to check your ticket status.",
             parse_mode="HTML"
@@ -700,11 +693,17 @@ async def status_ticket(update: Update, context):
         return
 
     ticket_id = context.args[0]
-    user = update.effective_user
+    if ticket_id not in ticket_status:
+        await update.message.reply_text(
+            f"❌ Ticket {code(ticket_id)} not found.",
+            parse_mode="HTML"
+        )
+        return
 
-    # Check permission: group allows any, private only own tickets
+    # Check if it's a private chat and the ticket doesn't belong to the user
     if update.effective_chat.type == "private":
-        if ticket_user.get(ticket_id) != user.id:
+        user_id = update.effective_user.id
+        if ticket_user.get(ticket_id) != user_id:
             await update.message.reply_text(
                 "❌ This ticket does not belong to you. Please use your correct Ticket ID.",
                 parse_mode="HTML"
@@ -722,53 +721,41 @@ async def status_ticket(update: Update, context):
 
 # ================= /profile =================
 async def profile(update: Update, context):
-    """Show user's profile and ticket history"""
+    """Show user's profile with their tickets"""
+    # Only in private chat
     if update.effective_chat.type != "private":
         await update.message.reply_text(
-            "❌ This command can only be used in private chat.",
+            "❌ This command can only be used in private chat with the bot.",
             parse_mode="HTML"
         )
         return
 
     user = update.effective_user
     user_id = user.id
+    first_name = html.escape(user.first_name or "")
+    username = user.username or "N/A"
 
     # Get user's tickets
-    ticket_list = user_tickets.get(user_id, [])
-    if not ticket_list:
-        await update.message.reply_text(
-            f"👤 My Dashboard\n\n"
-            f"Name: {html.escape(user.first_name or '')}\n"
-            f"Username: @{html.escape(user.username or '')}\n"
-            f"UID: {user_id}\n\n"
-            f"📊 Total Tickets Created: 0\n\n"
-            f"You have not created any tickets yet.\n\n"
-            f"⚠️ Please do not share your sensitive information with this bot and never share your Ticket ID with anyone. Only provide it directly to our official support bot.",
-            parse_mode="HTML"
-        )
-        return
+    tickets = user_tickets.get(user_id, [])
+    total_tickets = len(tickets)
 
-    # Sort tickets by creation time (oldest first)
-    # ticket_created_at has timestamps like "2026-02-24 14:28:11" which are sortable as strings
-    sorted_tickets = sorted(ticket_list, key=lambda tid: ticket_created_at.get(tid, ""))
+    response = f"👤 <b>My Dashboard</b>\n\n"
+    response += f"Name: {first_name}\n"
+    response += f"Username: @{html.escape(username)}\n"
+    response += f"UID: <code>{user_id}</code>\n\n"
+    response += f"📊 Total Tickets Created: {total_tickets}\n"
 
-    # Build response
-    response = f"👤 My Dashboard\n\n"
-    response += f"Name: {html.escape(user.first_name or '')}\n"
-    response += f"Username: @{html.escape(user.username or '')}\n"
-    response += f"UID: {user_id}\n\n"
-    response += f"📊 Total Tickets Created: {len(ticket_list)}\n\n"
+    if tickets:
+        response += "\n"
+        for i, ticket_id in enumerate(tickets, 1):
+            status = ticket_status.get(ticket_id, "Unknown")
+            created = ticket_created_at.get(ticket_id, "Unknown")
+            response += f"{i}. {code(ticket_id)} — {status}\n"
+            response += f"   Created: {created}\n\n"
+    else:
+        response += "\nNo tickets created yet.\n\n"
 
-    for i, tid in enumerate(sorted_tickets, 1):
-        status = ticket_status.get(tid, "Unknown")
-        created = ticket_created_at.get(tid, "")
-        response += f"{i}. {code(tid)} — {status}\n"
-        if created:
-            response += f"   Created: {created}\n"
-        else:
-            response += "\n"
-
-    response += f"\n⚠️ Please do not share your sensitive information with this bot and never share your Ticket ID with anyone. Only provide it directly to our official support bot."
+    response += "⚠️ Please do not share your sensitive information with this bot and never share your Ticket ID with anyone. Only provide it directly to our official support bot."
 
     await update.message.reply_text(response, parse_mode="HTML")
 
@@ -970,7 +957,7 @@ app.add_handler(CommandHandler("close", close_ticket))
 app.add_handler(CommandHandler("open", open_ticket))
 app.add_handler(CommandHandler("send", send_direct))
 app.add_handler(CommandHandler("status", status_ticket))
-app.add_handler(CommandHandler("profile", profile))  # New profile command
+app.add_handler(CommandHandler("profile", profile))
 app.add_handler(CommandHandler("list", list_tickets))
 app.add_handler(CommandHandler("export", export_ticket))
 app.add_handler(CommandHandler("history", ticket_history))
