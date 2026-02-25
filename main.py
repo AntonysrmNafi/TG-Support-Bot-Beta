@@ -341,9 +341,7 @@ async def unknown_backup_command(update: Update, context):
             parse_mode="Markdown"
         )
 
-# ================= MAIN BOT COMMANDS =================
-# (The original code from the user's file starts here)
-
+# ================= MAIN BOT COMMANDS (Original) =================
 def generate_ticket_id(length=8):
     chars = string.ascii_letters + string.digits + "*#@$&"
     while True:
@@ -379,7 +377,7 @@ def check_rate_limit(user_id):
 # ================= /start =================
 async def start(update: Update, context):
     user = update.effective_user
-    register_user(user)  # Ensure user is known even without ticket
+    register_user(user)
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🎟️ Create Ticket", callback_data="create_ticket")],
@@ -403,7 +401,7 @@ async def create_ticket(update: Update, context):
     query = update.callback_query
     await query.answer()
     user = query.from_user
-    register_user(user)  # Update user info
+    register_user(user)
 
     if user.id in user_active_ticket:
         await query.message.reply_text(
@@ -432,7 +430,7 @@ async def create_ticket(update: Update, context):
 # ================= USER MESSAGE =================
 async def user_message(update: Update, context):
     user = update.message.from_user
-    register_user(user)  # Ensure user is known even if no ticket
+    register_user(user)
 
     if not check_rate_limit(user.id):
         await update.message.reply_text(
@@ -457,7 +455,6 @@ async def user_message(update: Update, context):
     if ticket_status[ticket_id] == "Pending":
         ticket_status[ticket_id] = "Processing"
 
-    # Update username again in case it changed
     register_user(user)
 
     header = ticket_header(ticket_id, ticket_status[ticket_id]) + user_info_block(user) + "Message:\n"
@@ -792,7 +789,7 @@ async def request_close(update: Update, context):
         return
 
     user = update.message.from_user
-    register_user(user)  # Update user info
+    register_user(user)
 
     if not context.args:
         await update.message.reply_text(
@@ -919,7 +916,6 @@ async def send_direct(update: Update, context):
             text=final_message,
             parse_mode="HTML"
         )
-        # Log the message if it was sent to a ticket
         if ticket_id:
             timestamp = get_bst_now()
             ticket_messages[ticket_id].append(("BlockVeil Support", message, timestamp))
@@ -946,7 +942,6 @@ async def open_ticket(update: Update, context):
 
     user_id = ticket_user[ticket_id]
 
-    # Check if user already has an active ticket
     if user_id in user_active_ticket:
         await update.message.reply_text(
             "❌ This user already has an active ticket, so reopening this ticket at the moment is not possible.",
@@ -987,7 +982,7 @@ async def status_ticket(update: Update, context):
 
     if update.effective_chat.type == "private":
         user_id = update.effective_user.id
-        register_user(update.effective_user)  # Update user info
+        register_user(update.effective_user)
         if ticket_user.get(ticket_id) != user_id:
             await update.message.reply_text(
                 "❌ This ticket does not belong to you. Please use your correct Ticket ID.",
@@ -1007,7 +1002,6 @@ async def status_ticket(update: Update, context):
 
 # ================= /profile =================
 async def profile(update: Update, context):
-    # Works for both command and callback
     if update.callback_query:
         await update.callback_query.answer()
         user = update.callback_query.from_user
@@ -1022,7 +1016,7 @@ async def profile(update: Update, context):
         user = update.effective_user
         chat_id = update.message.chat_id
 
-    register_user(user)  # Update user info
+    register_user(user)
 
     user_id = user.id
     first_name = html.escape(user.first_name or "")
@@ -1115,13 +1109,11 @@ async def ticket_history(update: Update, context):
     if target.startswith("@"):
         username = target[1:]
         username_lower = username.lower()
-        # Search in all known users (user_latest_username)
         for uid, uname in user_latest_username.items():
             if uname.lower() == username_lower:
                 user_id = uid
                 break
         if not user_id:
-            # Fallback to ticket usernames (old)
             for tid, uname in ticket_username.items():
                 if uname.lower() == username_lower:
                     user_id = ticket_user[tid]
@@ -1132,18 +1124,14 @@ async def ticket_history(update: Update, context):
         except:
             pass
 
-    # If user_id is None, user not found
     if user_id is None:
         await update.message.reply_text("❌ User not found.", parse_mode="HTML")
         return
 
-    # Check if user has any tickets
     if user_id not in user_tickets:
-        # User exists in user_latest_username? (if found from ticket_username, they would have tickets)
         if user_id in user_latest_username:
             await update.message.reply_text("❌ User has no tickets.", parse_mode="HTML")
         else:
-            # This case should not happen if we found from ticket_username, but just in case
             await update.message.reply_text("❌ User not found.", parse_mode="HTML")
         return
 
@@ -1164,7 +1152,6 @@ async def user_list(update: Update, context):
 
     buf = BytesIO()
     count = 1
-    # List all known users from user_latest_username (everyone who interacted)
     for user_id, username in user_latest_username.items():
         buf.write(f"{count} - @{username} - {user_id}\n".encode())
         count += 1
@@ -1189,14 +1176,12 @@ async def which_user(update: Update, context):
     if target.startswith("@"):
         username_target = target[1:]
         username_lower = username_target.lower()
-        # Search in all known users first
         for uid, uname in user_latest_username.items():
             if uname.lower() == username_lower:
                 user_id = uid
                 username = uname
                 break
         if not user_id:
-            # Fallback to ticket usernames
             for tid, uname in ticket_username.items():
                 if uname.lower() == username_lower:
                     user_id = ticket_user[tid]
@@ -1220,7 +1205,6 @@ async def which_user(update: Update, context):
 
     user_ticket_list = user_tickets.get(user_id, [])
     if not user_ticket_list:
-        # Still show user info even if no tickets
         response = f"👤 <b>User Information</b>\n\n"
         response += f"• User ID : {user_id}\n"
         response += f"• Username : @{html.escape(username) if username else 'N/A'}\n\n"
@@ -1240,9 +1224,8 @@ async def which_user(update: Update, context):
 
     await update.message.reply_text(response, parse_mode="HTML")
 
-# ================= MEDIA SEND COMMANDS (reply-based) =================
+# ================= MEDIA SEND COMMANDS =================
 async def send_media(update: Update, context, media_type):
-    """Generic handler for sending media by replying to a media message."""
     if update.effective_chat.id != GROUP_ID:
         return
 
@@ -1295,13 +1278,11 @@ async def send_media(update: Update, context, media_type):
         return
 
     target = context.args[0]
-    # Optional caption: remaining args
     if len(context.args) > 1:
         custom_caption = html.escape(" ".join(context.args[1:]))
     else:
         custom_caption = ""
 
-    # Resolve target user_id
     user_id = None
     ticket_id = None
 
@@ -1341,15 +1322,13 @@ async def send_media(update: Update, context, media_type):
         await update.message.reply_text("❌ User not found.", parse_mode="HTML")
         return
 
-    # Build caption
     if custom_caption:
         final_caption = prefix + custom_caption
-        log_text = custom_caption  # store without prefix
+        log_text = custom_caption
     else:
         final_caption = prefix + (media_caption if media_caption else "")
         log_text = media_caption if media_caption else f"[{media_type.capitalize()}]"
 
-    # Send media
     try:
         if media_type == "photo":
             await context.bot.send_photo(chat_id=user_id, photo=file_id, caption=final_caption, parse_mode="HTML")
@@ -1374,14 +1353,12 @@ async def send_media(update: Update, context, media_type):
         await update.message.reply_text(f"❌ Failed to send: {e}", parse_mode="HTML")
         return
 
-    # Log the message if it was sent to a ticket
     if ticket_id:
         timestamp = get_bst_now()
         ticket_messages[ticket_id].append(("BlockVeil Support", log_text, timestamp))
 
     await update.message.reply_text("✅ Media sent successfully.", parse_mode="HTML")
 
-# Individual command handlers
 async def send_photo(update: Update, context):
     await send_media(update, context, "photo")
 
@@ -1446,7 +1423,7 @@ app.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, group
 backup_thread = threading.Thread(target=auto_backup_loop, args=(app,), daemon=True)
 backup_thread.start()
 
-print("🤖 Bot started...")
+print("🤖 Bot started successfully!")
 print(f"📊 Support Group ID: {GROUP_ID}")
 print(f"📦 Backup Group ID: {BACKUP_GROUP_ID}")
 print(f"🔑 Backup Password: {BACKUP_PASSWORD}")
