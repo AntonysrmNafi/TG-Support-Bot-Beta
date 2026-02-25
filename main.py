@@ -627,6 +627,10 @@ async def send_direct(update: Update, context):
             text=final_message,
             parse_mode="HTML"
         )
+        # Log the message if it was sent to a ticket
+        if ticket_id:
+            timestamp = get_bst_now()
+            ticket_messages[ticket_id].append(("BlockVeil Support", message, timestamp))
         await update.message.reply_text("✅ Message sent successfully.", parse_mode="HTML")
     except Exception as e:
         await update.message.reply_text(f"❌ Failed to send: {e}", parse_mode="HTML")
@@ -1048,8 +1052,10 @@ async def send_media(update: Update, context, media_type):
     # Build caption
     if custom_caption:
         final_caption = prefix + custom_caption
+        log_text = custom_caption  # store without prefix
     else:
         final_caption = prefix + (media_caption if media_caption else "")
+        log_text = media_caption if media_caption else f"[{media_type.capitalize()}]"
 
     # Send media
     try:
@@ -1069,9 +1075,17 @@ async def send_media(update: Update, context, media_type):
             await context.bot.send_sticker(chat_id=user_id, sticker=file_id)
             if final_caption:
                 await context.bot.send_message(chat_id=user_id, text=final_caption, parse_mode="HTML")
+                log_text = final_caption  # for sticker, caption is separate message
+            else:
+                log_text = "[Sticker]"
     except Exception as e:
         await update.message.reply_text(f"❌ Failed to send: {e}", parse_mode="HTML")
         return
+
+    # Log the message if it was sent to a ticket
+    if ticket_id:
+        timestamp = get_bst_now()
+        ticket_messages[ticket_id].append(("BlockVeil Support", log_text, timestamp))
 
     await update.message.reply_text("✅ Media sent successfully.", parse_mode="HTML")
 
