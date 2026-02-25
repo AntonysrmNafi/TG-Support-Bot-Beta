@@ -595,6 +595,10 @@ async def send_direct(update: Update, context):
 
     elif target.startswith("@"):
         username = target[1:]
+        # Fix: empty username check
+        if not username:
+            await update.message.reply_text("❌ Username cannot be empty.", parse_mode="HTML")
+            return
         username_lower = username.lower()
         for uid, uname in user_latest_username.items():
             if uname.lower() == username_lower:
@@ -644,8 +648,17 @@ async def open_ticket(update: Update, context):
         await update.message.reply_text("⚠️ Ticket already open.", parse_mode="HTML")
         return
 
-    ticket_status[ticket_id] = "Processing"
     user_id = ticket_user[ticket_id]
+
+    # Check if user already has an active ticket
+    if user_id in user_active_ticket:
+        await update.message.reply_text(
+            "❌ This user already has an active ticket, so reopening this ticket at the moment is not possible.",
+            parse_mode="HTML"
+        )
+        return
+
+    ticket_status[ticket_id] = "Processing"
     user_active_ticket[user_id] = ticket_id
 
     try:
@@ -823,8 +836,19 @@ async def ticket_history(update: Update, context):
         except:
             pass
 
+    # If user_id is None, user not found
+    if user_id is None:
+        await update.message.reply_text("❌ User not found.", parse_mode="HTML")
+        return
+
+    # Check if user has any tickets
     if user_id not in user_tickets:
-        await update.message.reply_text("❌ User not found or has no tickets.", parse_mode="HTML")
+        # User exists in user_latest_username? (if found from ticket_username, they would have tickets)
+        if user_id in user_latest_username:
+            await update.message.reply_text("❌ User has no tickets.", parse_mode="HTML")
+        else:
+            # This case should not happen if we found from ticket_username, but just in case
+            await update.message.reply_text("❌ User not found.", parse_mode="HTML")
         return
 
     text = f"📋 Ticket History for {target}\n\n"
@@ -997,6 +1021,9 @@ async def send_media(update: Update, context, media_type):
         prefix = f"🎫 Ticket ID: {code(ticket_id)}\n"
     elif target.startswith("@"):
         username = target[1:]
+        if not username:
+            await update.message.reply_text("❌ Username cannot be empty.", parse_mode="HTML")
+            return
         username_lower = username.lower()
         for uid, uname in user_latest_username.items():
             if uname.lower() == username_lower:
