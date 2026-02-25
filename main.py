@@ -558,7 +558,7 @@ async def send_direct(update: Update, context):
     if target == "@all":
         sent_count = 0
         failed_count = 0
-        unique_users = set(ticket_user.values())
+        unique_users = set(user_latest_username.keys())
         total_users = len(unique_users)
         await update.message.reply_text(f"📢 Broadcasting to {total_users} users...", parse_mode="HTML")
         for user_id in unique_users:
